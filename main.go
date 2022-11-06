@@ -75,6 +75,20 @@ func ldap_get_values(ld uintptr, entry uintptr, attr string) string {
 	return string(resByte)
 }
 
+func getDomainSPNTicket(user User) {
+	//domain := "DOMAIN"
+	// if regexp.MustCompile("^CN=.*").MatchString(user.distinguishedName){
+
+	// }
+
+}
+
+func getDomainSPNTickets(users []User) {
+	for _, user := range users {
+		getDomainSPNTicket(user)
+	}
+}
+
 func kerberoast() {
 	var nameType uint32 = windows.ComputerNameDnsDomain
 	var bufSize uint32 = 0
