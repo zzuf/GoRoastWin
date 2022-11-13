@@ -66,8 +66,8 @@ func GetComputerNameExA(nametype uint32, buf unsafe.Pointer, n *uint32) (err err
 	return
 }
 
-func LsaCallAuthenticationPackage(lsaHandle uintptr, authenticationPackage uint32, protocolSubmitBuffer uintptr, submitBufferLength uint32, protocolReturnBuffer uintptr, returnBufferLength *uint32, pNTSTATUS *uint32) (ret uint32) {
-	r0, _, _ := syscall.Syscall9(procLsaCallAuthenticationPackage.Addr(), 7, uintptr(lsaHandle), uintptr(authenticationPackage), uintptr(protocolSubmitBuffer), uintptr(submitBufferLength), uintptr(protocolReturnBuffer), uintptr(unsafe.Pointer(returnBufferLength)), uintptr(unsafe.Pointer(pNTSTATUS)), 0, 0)
+func LsaCallAuthenticationPackage(lsaHandle uintptr, authenticationPackage uint32, protocolSubmitBuffer uintptr, submitBufferLength uint32, protocolReturnBuffer *uintptr, returnBufferLength *uint32, pNTSTATUS *uint32) (ret uint32) {
+	r0, _, _ := syscall.Syscall9(procLsaCallAuthenticationPackage.Addr(), 7, uintptr(lsaHandle), uintptr(authenticationPackage), uintptr(protocolSubmitBuffer), uintptr(submitBufferLength), uintptr(unsafe.Pointer(protocolReturnBuffer)), uintptr(unsafe.Pointer(returnBufferLength)), uintptr(unsafe.Pointer(pNTSTATUS)), 0, 0)
 	ret = uint32(r0)
 	return
 }
