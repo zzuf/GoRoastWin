@@ -39,18 +39,23 @@ func errnoErr(e syscall.Errno) error {
 
 var (
 	modKernel32 = windows.NewLazySystemDLL("Kernel32.dll")
+	modSecur32  = windows.NewLazySystemDLL("Secur32.dll")
 	modWldap32  = windows.NewLazySystemDLL("Wldap32.dll")
 
-	procGetComputerNameExA = modKernel32.NewProc("GetComputerNameExA")
-	procldap_bind_sA       = modWldap32.NewProc("ldap_bind_sA")
-	procldap_count_entries = modWldap32.NewProc("ldap_count_entries")
-	procldap_first_entry   = modWldap32.NewProc("ldap_first_entry")
-	procldap_get_valuesA   = modWldap32.NewProc("ldap_get_valuesA")
-	procldap_initA         = modWldap32.NewProc("ldap_initA")
-	procldap_next_entry    = modWldap32.NewProc("ldap_next_entry")
-	procldap_search_sA     = modWldap32.NewProc("ldap_search_sA")
-	procldap_unbind_s      = modWldap32.NewProc("ldap_unbind_s")
-	procldap_value_free    = modWldap32.NewProc("ldap_value_free")
+	procGetComputerNameExA             = modKernel32.NewProc("GetComputerNameExA")
+	procLsaCallAuthenticationPackage   = modSecur32.NewProc("LsaCallAuthenticationPackage")
+	procLsaConnectUntrusted            = modSecur32.NewProc("LsaConnectUntrusted")
+	procLsaDeregisterLogonProcess      = modSecur32.NewProc("LsaDeregisterLogonProcess")
+	procLsaLookupAuthenticationPackage = modSecur32.NewProc("LsaLookupAuthenticationPackage")
+	procldap_bind_sA                   = modWldap32.NewProc("ldap_bind_sA")
+	procldap_count_entries             = modWldap32.NewProc("ldap_count_entries")
+	procldap_first_entry               = modWldap32.NewProc("ldap_first_entry")
+	procldap_get_valuesA               = modWldap32.NewProc("ldap_get_valuesA")
+	procldap_initA                     = modWldap32.NewProc("ldap_initA")
+	procldap_next_entry                = modWldap32.NewProc("ldap_next_entry")
+	procldap_search_sA                 = modWldap32.NewProc("ldap_search_sA")
+	procldap_unbind_s                  = modWldap32.NewProc("ldap_unbind_s")
+	procldap_value_free                = modWldap32.NewProc("ldap_value_free")
 )
 
 func GetComputerNameExA(nametype uint32, buf unsafe.Pointer, n *uint32) (err error) {
@@ -61,15 +66,39 @@ func GetComputerNameExA(nametype uint32, buf unsafe.Pointer, n *uint32) (err err
 	return
 }
 
-func ldap_bind_sW(ld uintptr, dn *uint8, cred *uint8, method uint64) (ret uint64) {
-	r0, _, _ := syscall.Syscall6(procldap_bind_sA.Addr(), 4, uintptr(ld), uintptr(unsafe.Pointer(dn)), uintptr(unsafe.Pointer(cred)), uintptr(method), 0, 0)
-	ret = uint64(r0)
+func LsaCallAuthenticationPackage(lsaHandle uintptr, authenticationPackage uint32, protocolSubmitBuffer uintptr, submitBufferLength uint32, protocolReturnBuffer uintptr, returnBufferLength *uint32, pNTSTATUS *uint32) (ret uint32) {
+	r0, _, _ := syscall.Syscall9(procLsaCallAuthenticationPackage.Addr(), 7, uintptr(lsaHandle), uintptr(authenticationPackage), uintptr(protocolSubmitBuffer), uintptr(submitBufferLength), uintptr(protocolReturnBuffer), uintptr(unsafe.Pointer(returnBufferLength)), uintptr(unsafe.Pointer(pNTSTATUS)), 0, 0)
+	ret = uint32(r0)
 	return
 }
 
-func ldap_count_entries(ld uintptr, res uintptr) (ret uint64) {
+func LsaConnectUntrusted(lsaHandle *uintptr) (ret uint32) {
+	r0, _, _ := syscall.Syscall(procLsaConnectUntrusted.Addr(), 1, uintptr(unsafe.Pointer(lsaHandle)), 0, 0)
+	ret = uint32(r0)
+	return
+}
+
+func LsaDeregisterLogonProcess(lsaHandle uintptr) (ret uint32) {
+	r0, _, _ := syscall.Syscall(procLsaDeregisterLogonProcess.Addr(), 1, uintptr(lsaHandle), 0, 0)
+	ret = uint32(r0)
+	return
+}
+
+func LsaLookupAuthenticationPackage(lsaHandle uintptr, packageName *LSA_STRING, authenticationPackage *uint32) (ret uint32) {
+	r0, _, _ := syscall.Syscall(procLsaLookupAuthenticationPackage.Addr(), 3, uintptr(lsaHandle), uintptr(unsafe.Pointer(packageName)), uintptr(unsafe.Pointer(authenticationPackage)))
+	ret = uint32(r0)
+	return
+}
+
+func ldap_bind_sW(ld uintptr, dn *uint8, cred *uint8, method uint32) (ret uint32) {
+	r0, _, _ := syscall.Syscall6(procldap_bind_sA.Addr(), 4, uintptr(ld), uintptr(unsafe.Pointer(dn)), uintptr(unsafe.Pointer(cred)), uintptr(method), 0, 0)
+	ret = uint32(r0)
+	return
+}
+
+func ldap_count_entries(ld uintptr, res uintptr) (ret uint32) {
 	r0, _, _ := syscall.Syscall(procldap_count_entries.Addr(), 2, uintptr(ld), uintptr(res), 0)
-	ret = uint64(r0)
+	ret = uint32(r0)
 	return
 }
 
@@ -85,7 +114,7 @@ func ldap_get_valuesA(ld uintptr, entry uintptr, attr *uint8) (ret **uint8) {
 	return
 }
 
-func ldap_initW(hostName string, portNumber uint64) (ld uintptr, err error) {
+func ldap_initW(hostName string, portNumber uint32) (ld uintptr, err error) {
 	var _p0 *byte
 	_p0, err = syscall.BytePtrFromString(hostName)
 	if err != nil {
@@ -94,7 +123,7 @@ func ldap_initW(hostName string, portNumber uint64) (ld uintptr, err error) {
 	return _ldap_initW(_p0, portNumber)
 }
 
-func _ldap_initW(hostName *byte, portNumber uint64) (ld uintptr, err error) {
+func _ldap_initW(hostName *byte, portNumber uint32) (ld uintptr, err error) {
 	r0, _, e1 := syscall.Syscall(procldap_initA.Addr(), 2, uintptr(unsafe.Pointer(hostName)), uintptr(portNumber), 0)
 	ld = uintptr(r0)
 	if ld == 0 {
@@ -109,20 +138,20 @@ func ldap_next_entry(ld uintptr, res uintptr) (ret uintptr) {
 	return
 }
 
-func ldap_search_sA(ld uintptr, base *uint8, scope uint64, filter *uint8, attrs **uint8, attrsonly uint64, res *uintptr) (ret uint64) {
+func ldap_search_sA(ld uintptr, base *uint8, scope uint32, filter *uint8, attrs **uint8, attrsonly uint32, res *uintptr) (ret uint32) {
 	r0, _, _ := syscall.Syscall9(procldap_search_sA.Addr(), 7, uintptr(ld), uintptr(unsafe.Pointer(base)), uintptr(scope), uintptr(unsafe.Pointer(filter)), uintptr(unsafe.Pointer(attrs)), uintptr(attrsonly), uintptr(unsafe.Pointer(res)), 0, 0)
-	ret = uint64(r0)
+	ret = uint32(r0)
 	return
 }
 
-func ldap_unbind_s(ld uintptr) (ret uint64) {
+func ldap_unbind_s(ld uintptr) (ret uint32) {
 	r0, _, _ := syscall.Syscall(procldap_unbind_s.Addr(), 1, uintptr(ld), 0, 0)
-	ret = uint64(r0)
+	ret = uint32(r0)
 	return
 }
 
-func ldap_value_free(vals **uint8) (ret uint64) {
+func ldap_value_free(vals **uint8) (ret uint32) {
 	r0, _, _ := syscall.Syscall(procldap_value_free.Addr(), 1, uintptr(unsafe.Pointer(vals)), 0, 0)
-	ret = uint64(r0)
+	ret = uint32(r0)
 	return
 }
