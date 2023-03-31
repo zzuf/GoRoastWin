@@ -318,13 +318,4 @@ func main() {
 	for _, user := range users {
 		getDomainSPNTicket(user)
 	}
-
-	// usage := `Usage: usage`
-	// if len(os.Args) < 2 {
-	// 	fmt.Println(usage)
-	// } else if os.Args[1] == "/do" {
-	// 	kerberoast()
-	// } else {
-	// 	return
-	// }
 }
