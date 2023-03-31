@@ -109,9 +109,9 @@ type KERB_RETRIEVE_TKT_RESPONSE struct {
 }
 
 type KERB_EXTERNAL_TICKET struct {
-	serviceName         uintptr
-	targetName          uintptr
-	clientName          uintptr
+	serviceName         uintptr //PKERB_EXTERNAL_NAME
+	targetName          uintptr //PKERB_EXTERNAL_NAME
+	clientName          uintptr //PKERB_EXTERNAL_NAME
 	domainName          windows.NTUnicodeString
 	targetDomainName    windows.NTUnicodeString
 	altTargetDomainName windows.NTUnicodeString
@@ -307,7 +307,7 @@ func kerberoast() []User {
 		distinguishedName := ldap_get_values(ld, entry, "distinguishedName")
 		servicePrincipalName := ldap_get_values(ld, entry, "servicePrincipalName")
 		users = append(users, User{sAMAccountName: samAccountName, distinguishedName: distinguishedName, servicePrincipalName: servicePrincipalName})
-		entry = ldap_next_entry(ld, res)
+		entry = ldap_next_entry(ld, entry)
 	}
 	ldap_unbind_s(ld)
 	return users
